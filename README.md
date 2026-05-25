@@ -15,13 +15,14 @@ Windows-only tray dictation app using `faster-whisper`.
 - The transcript is pasted into the focused text input when one is detected.
 - If no focused text input is detected, the transcript is left in the clipboard.
 - The tray icon is white when idle and red while recording, transcribing, downloading, or warming up the model.
-- Right-click the tray icon to restart, exit, choose transcription language, choose the model, or set the recording shortcut.
+- Right-click the tray icon to restart, exit, choose transcription language, choose the model, set the recording shortcut, or use debug actions.
 - The `set shortcut` tray option opens a small input above the tray area; press the shortcut combination and then Enter to save it.
 - The language menu supports `auto`, `en`, and `pl`.
 - The model menu is populated from `faster_whisper.utils.available_models()`, with `large-v3` placed first as the default.
 - The current language and model are shown with native tray menu radio/check indicators.
 - The selected language, model, and shortcut are saved in `.local/settings/config.json`.
 - Models are downloaded and cached under `.local/models/` in this workspace.
+- The debug menu can remove `.local/` and restart model selection, or open `.local/logs/`.
 - GPU inference uses CUDA device `0` by default. If it is unavailable, the app shows `gpu inference not available, running on cpu` and falls back to CPU.
 
 ## Create a local environment

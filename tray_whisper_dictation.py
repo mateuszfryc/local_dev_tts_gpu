@@ -3,6 +3,7 @@ import ctypes
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -191,6 +192,19 @@ def setup_logging() -> None:
     ):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
     logging.info("logging initialized: %s pid=%s", LOG_FILE, os.getpid())
+
+
+def close_logging_for_local_delete() -> None:
+    global LOG_FILE
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        try:
+            handler.flush()
+            handler.close()
+        except Exception:
+            pass
+    LOG_FILE = None
 
 
 SUPPORTED_PYTHON_MIN = (3, 9)
@@ -793,6 +807,17 @@ class DictationApp:
                 self.set_shortcut,
                 enabled=lambda _item: self.state == AppState.IDLE,
             ),
+            pystray.MenuItem(
+                "debug",
+                pystray.Menu(
+                    pystray.MenuItem(
+                        "remove local data",
+                        self.remove_local_data,
+                        enabled=lambda _item: self.state == AppState.IDLE,
+                    ),
+                    pystray.MenuItem("open logs directory", self.open_logs_directory),
+                ),
+            ),
             pystray.MenuItem("restart", self.restart_app),
             pystray.MenuItem("exit", self.exit_app),
         )
@@ -950,6 +975,68 @@ class DictationApp:
         logging.info("restart_app requested")
         self.restart_requested = True
         self.exit_app()
+
+    def remove_local_data(self, _icon=None, _item=None) -> None:
+        logging.info("remove_local_data requested")
+        with self.state_lock:
+            if self.state != AppState.IDLE:
+                self.notify("Cannot remove local data while recording or transcribing.")
+                return
+            self.state = AppState.DOWNLOADING_MODEL
+            self.refresh_icon()
+
+        self.unregister_hotkey()
+        self.stop_stream()
+        self.model = None
+        self.model_device = ""
+        self.gpu_disabled = False
+
+        import gc
+
+        gc.collect()
+        close_logging_for_local_delete()
+        try:
+            if LOCAL_DIR.exists():
+                shutil.rmtree(LOCAL_DIR)
+        except Exception as exc:
+            setup_logging()
+            logging.exception("failed to remove local data directory")
+            with self.state_lock:
+                self.state = AppState.IDLE
+                self.refresh_icon()
+            self.notify(f"failed to remove local data: {exc}")
+            return
+
+        setup_logging()
+        logging.info("local data removed path=%s", LOCAL_DIR)
+        self.config = Config()
+        self.model_names = get_available_model_names()
+        if self.icon:
+            self.icon.update_menu()
+
+        with self.state_lock:
+            self.state = AppState.IDLE
+            self.refresh_icon()
+
+        model_name = self.show_initial_model_dialog()
+        logging.info("remove_local_data selected model=%s", model_name)
+        self.config.model_name = model_name
+        self.config.save()
+        threading.Thread(
+            target=self.download_selected_model,
+            args=(model_name,),
+            name="debug-local-data-download",
+            daemon=True,
+        ).start()
+
+    def open_logs_directory(self, _icon=None, _item=None) -> None:
+        logging.info("open_logs_directory requested")
+        try:
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(LOGS_DIR))
+        except Exception as exc:
+            logging.exception("failed to open logs directory")
+            self.notify(f"failed to open logs directory: {exc}")
 
     def exit_app(self, _icon=None, _item=None) -> None:
         logging.info("exit_app requested")
