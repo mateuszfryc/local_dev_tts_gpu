@@ -3,6 +3,7 @@ import ctypes
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -19,10 +20,18 @@ LOCAL_DIR = WORKSPACE_ROOT / ".local"
 MODELS_DIR = LOCAL_DIR / "models"
 SETTINGS_DIR = LOCAL_DIR / "settings"
 LOGS_DIR = LOCAL_DIR / "logs"
+WARMUP_AUDIO_PATH = WORKSPACE_ROOT / "assets" / "warmup.mp3"
 LOG_FILE: Path | None = None
 HOTKEY_ID = 1
+MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
+VK_CONTROL = 0x11
+VK_SHIFT = 0x10
+VK_MENU = 0x12
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
 VK_SPACE = 0x20
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -363,13 +372,62 @@ logging.info("runtime dependencies imported")
 
 
 APP_NAME = "Whisper Tray Dictation"
-HOTKEY = "ctrl+shift+space"
+DEFAULT_HOTKEY = "ctrl+shift+space"
 SAMPLE_RATE = 16000
 CHANNELS = 1
 DEFAULT_MODEL_NAME = "large-v3"
 SUPPORTED_LANGUAGES = ("auto", "en", "pl")
 PASTED_MESSAGE = "pasted transcript in active input"
 CLIPBOARD_MESSAGE = "transcript  in clipboard"
+MODIFIER_ORDER = ("ctrl", "shift", "alt", "win")
+MODIFIER_FLAGS = {
+    "alt": MOD_ALT,
+    "ctrl": MOD_CONTROL,
+    "shift": MOD_SHIFT,
+    "win": MOD_WIN,
+}
+MODIFIER_ALIASES = {
+    "control": "ctrl",
+    "ctrl": "ctrl",
+    "shift": "shift",
+    "alt": "alt",
+    "menu": "alt",
+    "win": "win",
+    "windows": "win",
+}
+SPECIAL_KEY_VKS = {
+    "space": VK_SPACE,
+    "tab": 0x09,
+    "esc": 0x1B,
+    "escape": 0x1B,
+    "backspace": 0x08,
+    "delete": 0x2E,
+    "insert": 0x2D,
+    "home": 0x24,
+    "end": 0x23,
+    "pageup": 0x21,
+    "prior": 0x21,
+    "pagedown": 0x22,
+    "next": 0x22,
+    "up": 0x26,
+    "down": 0x28,
+    "left": 0x25,
+    "right": 0x27,
+}
+IGNORED_SHORTCUT_KEYSYMS = {
+    "control_l",
+    "control_r",
+    "shift_l",
+    "shift_r",
+    "alt_l",
+    "alt_r",
+    "super_l",
+    "super_r",
+    "win_l",
+    "win_r",
+    "return",
+    "enter",
+}
 
 
 class AppState(Enum):
@@ -377,6 +435,89 @@ class AppState(Enum):
     RECORDING = "recording"
     TRANSCRIBING = "transcribing"
     DOWNLOADING_MODEL = "downloading_model"
+    WARMING_UP = "warming_up"
+
+
+def canonical_hotkey_text(modifiers: set[str], key: str) -> str:
+    ordered_modifiers = [modifier for modifier in MODIFIER_ORDER if modifier in modifiers]
+    return "+".join((*ordered_modifiers, key))
+
+
+def key_to_vk(key: str) -> int | None:
+    key = key.lower()
+    if len(key) == 1 and "a" <= key <= "z":
+        return ord(key.upper())
+    if len(key) == 1 and "0" <= key <= "9":
+        return ord(key)
+    if key.startswith("f") and key[1:].isdigit():
+        function_key = int(key[1:])
+        if 1 <= function_key <= 24:
+            return 0x70 + function_key - 1
+    return SPECIAL_KEY_VKS.get(key)
+
+
+def parse_hotkey(hotkey: str) -> tuple[int, int, str] | None:
+    tokens = [token.strip().lower() for token in hotkey.split("+") if token.strip()]
+    if not tokens:
+        return None
+
+    modifiers: set[str] = set()
+    key = ""
+    for token in tokens:
+        if token in MODIFIER_ALIASES:
+            modifiers.add(MODIFIER_ALIASES[token])
+            continue
+        if key:
+            return None
+        key = token
+
+    if not modifiers or not key:
+        return None
+
+    vk = key_to_vk(key)
+    if vk is None:
+        return None
+
+    modifier_flags = 0
+    for modifier in modifiers:
+        modifier_flags |= MODIFIER_FLAGS[modifier]
+    return modifier_flags, vk, canonical_hotkey_text(modifiers, key)
+
+
+def get_pressed_modifier_names() -> set[str]:
+    if sys.platform != "win32":
+        return set()
+    user32 = ctypes.windll.user32
+
+    def pressed(vk: int) -> bool:
+        return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+    modifiers = set()
+    if pressed(VK_CONTROL):
+        modifiers.add("ctrl")
+    if pressed(VK_SHIFT):
+        modifiers.add("shift")
+    if pressed(VK_MENU):
+        modifiers.add("alt")
+    if pressed(VK_LWIN) or pressed(VK_RWIN):
+        modifiers.add("win")
+    return modifiers
+
+
+def key_name_from_tk_event(event) -> str | None:
+    keysym = (event.keysym or "").lower()
+    if keysym in IGNORED_SHORTCUT_KEYSYMS:
+        return None
+    if len(keysym) == 1 and keysym.isalnum():
+        return keysym.lower()
+    if keysym in SPECIAL_KEY_VKS:
+        return "space" if keysym == "space" else keysym
+    if keysym.startswith("f") and keysym[1:].isdigit():
+        return keysym
+    char = (event.char or "").lower()
+    if len(char) == 1 and char.isalnum():
+        return char
+    return None
 
 
 class Config:
@@ -384,6 +525,7 @@ class Config:
         self.path = SETTINGS_DIR / "config.json"
         self.language = "auto"
         self.model_name = DEFAULT_MODEL_NAME
+        self.hotkey = DEFAULT_HOTKEY
         logging.info("config initialized with path=%s", self.path)
         self.load()
 
@@ -412,12 +554,21 @@ class Config:
         elif model_name is not None:
             logging.warning("ignored unsupported model_name in config: %s", model_name)
 
+        hotkey = data.get("hotkey")
+        parsed_hotkey = parse_hotkey(hotkey) if isinstance(hotkey, str) else None
+        if parsed_hotkey is not None:
+            self.hotkey = parsed_hotkey[2]
+            logging.info("loaded hotkey=%s", self.hotkey)
+        elif hotkey is not None:
+            logging.warning("ignored unsupported hotkey in config: %s", hotkey)
+
     def save(self) -> None:
         logging.info(
-            "saving config path=%s language=%s model_name=%s",
+            "saving config path=%s language=%s model_name=%s hotkey=%s",
             self.path,
             self.language,
             self.model_name,
+            self.hotkey,
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
@@ -425,6 +576,7 @@ class Config:
                 {
                     "language": self.language,
                     "model_name": self.model_name,
+                    "hotkey": self.hotkey,
                 },
                 indent=2,
             ),
@@ -460,14 +612,18 @@ class DictationApp:
         self.hotkey_thread_id: int | None = None
         self.hotkey_ready = threading.Event()
         self.hotkey_registration_error: Exception | None = None
+        self.registered_hotkey = ""
+        self.native_balloon_available = True
         self.stop_event = threading.Event()
         self.exit_lock = threading.Lock()
         self.exiting = False
+        self.restart_requested = False
         logging.info(
-            "DictationApp init complete state=%s language=%s model=%s",
+            "DictationApp init complete state=%s language=%s model=%s hotkey=%s",
             self.state.value,
             self.config.language,
             self.config.model_name,
+            self.config.hotkey,
         )
 
     def run(self) -> None:
@@ -510,35 +666,54 @@ class DictationApp:
                 daemon=True,
             ).start()
             return
-        self.register_hotkey()
+        self.start_warmup_then_register()
 
     def register_hotkey(self) -> None:
         logging.info("register_hotkey requested already_registered=%s", self.hotkey_registered)
         if self.hotkey_registered:
             return
 
+        parsed_hotkey = parse_hotkey(self.config.hotkey)
+        if parsed_hotkey is None:
+            logging.warning("configured hotkey invalid; falling back to %s", DEFAULT_HOTKEY)
+            self.config.hotkey = DEFAULT_HOTKEY
+            self.config.save()
+            parsed_hotkey = parse_hotkey(DEFAULT_HOTKEY)
+        if parsed_hotkey is None:
+            logging.error("default hotkey is invalid: %s", DEFAULT_HOTKEY)
+            return
+
+        modifiers, vk, hotkey_text = parsed_hotkey
+
         self.hotkey_ready.clear()
         self.hotkey_registration_error = None
         self.hotkey_thread = threading.Thread(
             target=self.hotkey_message_loop,
+            args=(hotkey_text, modifiers, vk),
             name="win32-hotkey",
             daemon=True,
         )
         self.hotkey_thread.start()
         if not self.hotkey_ready.wait(timeout=2.0):
-            logging.error("hotkey registration timed out: %s", HOTKEY)
+            logging.error("hotkey registration timed out: %s", hotkey_text)
             return
         if self.hotkey_registration_error is not None:
             logging.error(
                 "hotkey registration failed: %s error=%s",
-                HOTKEY,
+                hotkey_text,
                 self.hotkey_registration_error,
             )
             return
-        logging.info("hotkey registered: %s", HOTKEY)
+        self.registered_hotkey = hotkey_text
+        logging.info("hotkey registered: %s modifiers=%s vk=%s", hotkey_text, modifiers, vk)
 
-    def hotkey_message_loop(self) -> None:
-        logging.info("hotkey message loop starting")
+    def hotkey_message_loop(self, hotkey_text: str, modifiers: int, vk: int) -> None:
+        logging.info(
+            "hotkey message loop starting hotkey=%s modifiers=%s vk=%s",
+            hotkey_text,
+            modifiers,
+            vk,
+        )
         if sys.platform != "win32":
             self.hotkey_registration_error = RuntimeError("Win32 hotkey requires Windows")
             self.hotkey_ready.set()
@@ -549,7 +724,7 @@ class DictationApp:
         self.hotkey_thread_id = kernel32.GetCurrentThreadId()
         logging.info("hotkey thread id=%s", self.hotkey_thread_id)
 
-        if not user32.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_SHIFT, VK_SPACE):
+        if not user32.RegisterHotKey(None, HOTKEY_ID, modifiers, vk):
             self.hotkey_registration_error = ctypes.WinError()
             self.hotkey_ready.set()
             return
@@ -567,12 +742,13 @@ class DictationApp:
                     logging.error("hotkey GetMessageW failed: %s", ctypes.WinError())
                     break
                 if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
-                    logging.info("WM_HOTKEY received: %s", HOTKEY)
+                    logging.info("WM_HOTKEY received: %s", hotkey_text)
                     self.toggle_recording()
         finally:
             user32.UnregisterHotKey(None, HOTKEY_ID)
             self.hotkey_registered = False
-            logging.info("hotkey unregistered and message loop ended: %s", HOTKEY)
+            self.registered_hotkey = ""
+            logging.info("hotkey unregistered and message loop ended: %s", hotkey_text)
 
     def unregister_hotkey(self) -> None:
         logging.info(
@@ -612,6 +788,12 @@ class DictationApp:
                 "model",
                 pystray.Menu(*self.make_model_items()),
             ),
+            pystray.MenuItem(
+                "set shortcut",
+                self.set_shortcut,
+                enabled=lambda _item: self.state == AppState.IDLE,
+            ),
+            pystray.MenuItem("restart", self.restart_app),
             pystray.MenuItem("exit", self.exit_app),
         )
 
@@ -717,6 +899,57 @@ class DictationApp:
                 name="model-menu-download",
                 daemon=True,
             ).start()
+            return
+
+        if self.hotkey_registered:
+            self.unregister_hotkey()
+        self.start_warmup_then_register()
+
+    def set_shortcut(self, _icon=None, _item=None) -> None:
+        logging.info("set_shortcut requested")
+        with self.state_lock:
+            if self.state != AppState.IDLE:
+                self.notify("Cannot change shortcut while recording or transcribing.")
+                return
+
+        was_registered = self.hotkey_registered
+        if was_registered:
+            self.unregister_hotkey()
+
+        selected_hotkey = self.show_shortcut_dialog()
+        if selected_hotkey is None:
+            logging.info("set_shortcut cancelled")
+            if was_registered:
+                self.register_hotkey()
+            return
+
+        parsed_hotkey = parse_hotkey(selected_hotkey)
+        if parsed_hotkey is None:
+            logging.warning("set_shortcut rejected invalid hotkey=%s", selected_hotkey)
+            self.notify("invalid shortcut")
+            if was_registered:
+                self.register_hotkey()
+            return
+
+        normalized_hotkey = parsed_hotkey[2]
+        logging.info("set_shortcut accepted hotkey=%s", normalized_hotkey)
+
+        self.config.hotkey = normalized_hotkey
+        self.config.save()
+        if self.icon:
+            self.icon.update_menu()
+
+        if was_registered:
+            self.register_hotkey()
+            if not self.hotkey_registered:
+                self.notify(f"shortcut registration failed: {normalized_hotkey}")
+                return
+        self.notify(f"shortcut set to {normalized_hotkey}")
+
+    def restart_app(self, _icon=None, _item=None) -> None:
+        logging.info("restart_app requested")
+        self.restart_requested = True
+        self.exit_app()
 
     def exit_app(self, _icon=None, _item=None) -> None:
         logging.info("exit_app requested")
@@ -739,6 +972,20 @@ class DictationApp:
                 logging.info("tray icon stop requested")
         except Exception:
             logging.exception("exit_app failed")
+
+    def start_replacement_process(self) -> None:
+        logging.info("start_replacement_process requested")
+        args = [sys.executable, str(Path(__file__).resolve())]
+        try:
+            subprocess.Popen(
+                args,
+                cwd=str(WORKSPACE_ROOT),
+                close_fds=True,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+            logging.info("replacement process started args=%s", args)
+        except Exception:
+            logging.exception("failed to start replacement process args=%s", args)
 
     def request_exit_from_console(self, event_type: int) -> None:
         logging.info("console control event received: %s", event_type)
@@ -991,11 +1238,48 @@ class DictationApp:
         self.config.model_name = model_name
         self.config.save()
         self.notify(f"downloaded model {model_name}")
+        self.start_warmup_then_register()
+
+    def start_warmup_then_register(self) -> None:
+        logging.info("start_warmup_then_register requested")
+        threading.Thread(
+            target=self.warmup_then_register,
+            name="model-warmup",
+            daemon=True,
+        ).start()
+
+    def warmup_then_register(self) -> None:
+        logging.info("warmup_then_register start")
+        warmup_succeeded = False
         with self.state_lock:
-            self.state = AppState.IDLE
-            logging.info("state changed to idle after successful download")
+            if self.state not in {AppState.IDLE, AppState.DOWNLOADING_MODEL}:
+                logging.info("warmup skipped because state=%s", self.state.value)
+                return
+            self.state = AppState.WARMING_UP
+            logging.info("state changed to warming_up")
             self.refresh_icon()
-        self.register_hotkey()
+
+        try:
+            if not WARMUP_AUDIO_PATH.exists():
+                logging.warning("warmup audio missing: %s", WARMUP_AUDIO_PATH)
+                self.notify("warmup audio missing")
+                return
+
+            self.notify(f"warming up model {self.config.model_name}")
+            text = self.transcribe_file(str(WARMUP_AUDIO_PATH))
+            logging.info("warmup transcription discarded text_length=%s", len(text))
+            warmup_succeeded = True
+            self.notify(f"model ready {self.config.model_name}")
+        except Exception as exc:
+            logging.exception("model warmup failed")
+            self.notify(f"model warmup failed: {exc}")
+        finally:
+            with self.state_lock:
+                self.state = AppState.IDLE
+                logging.info("state changed to idle after warmup")
+                self.refresh_icon()
+            if warmup_succeeded and not self.exiting:
+                self.register_hotkey()
 
     def show_initial_model_dialog(self) -> str:
         logging.info("show_initial_model_dialog start")
@@ -1059,6 +1343,90 @@ class DictationApp:
 
         logging.info("show_initial_model_dialog end selected=%s", chosen_model["name"])
         return chosen_model["name"]
+
+    def show_shortcut_dialog(self) -> str | None:
+        logging.info("show_shortcut_dialog start current_hotkey=%s", self.config.hotkey)
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("set shortcut")
+        root.resizable(False, False)
+        root.attributes("-topmost", True)
+
+        captured_hotkey = {"value": self.config.hotkey}
+        result = {"value": None}
+        current_text = tk.StringVar(value=self.config.hotkey)
+
+        frame = ttk.Frame(root, padding=12)
+        frame.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Label(
+            frame,
+            text="press keyboard shorctu combination and Enter to confirm",
+            justify="left",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        entry = ttk.Entry(frame, textvariable=current_text, width=36)
+        entry.grid(row=1, column=0, sticky="ew")
+
+        def capture(event) -> str:
+            keysym = (event.keysym or "").lower()
+            if keysym in {"return", "enter"}:
+                return accept()
+            if keysym == "escape":
+                return cancel()
+
+            key_name = key_name_from_tk_event(event)
+            if key_name is None:
+                return "break"
+
+            modifiers = get_pressed_modifier_names()
+            if not modifiers:
+                logging.info("shortcut dialog ignored key without modifier: %s", key_name)
+                return "break"
+
+            hotkey = canonical_hotkey_text(modifiers, key_name)
+            if parse_hotkey(hotkey) is None:
+                logging.info("shortcut dialog ignored invalid hotkey candidate: %s", hotkey)
+                return "break"
+
+            captured_hotkey["value"] = hotkey
+            current_text.set(hotkey)
+            entry.icursor(tk.END)
+            logging.info("shortcut dialog captured hotkey=%s", hotkey)
+            return "break"
+
+        def accept(_event=None) -> str:
+            result["value"] = captured_hotkey["value"]
+            logging.info("shortcut dialog accepted hotkey=%s", result["value"])
+            root.destroy()
+            return "break"
+
+        def cancel(_event=None) -> str:
+            logging.info("shortcut dialog cancelled")
+            result["value"] = None
+            root.destroy()
+            return "break"
+
+        entry.bind("<KeyPress>", capture)
+        root.bind("<Return>", accept)
+        root.bind("<Escape>", cancel)
+        root.protocol("WM_DELETE_WINDOW", cancel)
+
+        root.update_idletasks()
+        width = root.winfo_width()
+        height = root.winfo_height()
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        x = max(0, screen_width - width - 24)
+        y = max(0, screen_height - height - 96)
+        root.geometry(f"+{x}+{y}")
+        entry.focus_set()
+        root.mainloop()
+
+        logging.info("show_shortcut_dialog end selected=%s", result["value"])
+        return result["value"]
 
     def cuda_device_0_available(self) -> bool:
         logging.info("checking CUDA device count")
@@ -1216,9 +1584,13 @@ class DictationApp:
         except Exception:
             logging.exception("tray notification failed: %s", message)
         self.show_native_balloon(message)
+        self.show_tray_popup(message)
 
     def show_native_balloon(self, message: str) -> None:
         if sys.platform != "win32" or not self.icon:
+            return
+        if not self.native_balloon_available:
+            logging.info("native balloon skipped: disabled after previous failure")
             return
         hwnd = getattr(self.icon, "_hwnd", None)
         if not hwnd:
@@ -1232,13 +1604,126 @@ class DictationApp:
             data.uFlags = NIF_INFO
             data.szInfo = message[:255]
             data.szInfoTitle = APP_NAME[:63]
-            data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME
+            data.dwInfoFlags = NIIF_INFO
             if ctypes.windll.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(data)):
                 logging.info("native tray balloon requested")
             else:
-                logging.warning("native tray balloon failed: %s", ctypes.WinError())
+                self.native_balloon_available = False
+                logging.warning("native tray balloon disabled after failure: %s", ctypes.WinError())
         except Exception:
+            self.native_balloon_available = False
             logging.exception("native tray balloon failed with exception")
+
+    def show_tray_popup(self, message: str) -> None:
+        logging.info("show_tray_popup requested: %s", message)
+        threading.Thread(
+            target=self.run_tray_popup,
+            args=(message,),
+            name="tray-popup",
+            daemon=True,
+        ).start()
+
+    def run_tray_popup(self, message: str) -> None:
+        logging.info("run_tray_popup start")
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.title(APP_NAME)
+            root.resizable(False, False)
+            root.attributes("-topmost", True)
+            root.overrideredirect(True)
+            transparent_color = "#ff00ff"
+            root.configure(bg=transparent_color)
+            try:
+                root.attributes("-transparentcolor", transparent_color)
+            except Exception:
+                logging.exception("tray popup transparent color unavailable")
+
+            padding_x = 14
+            padding_y = 10
+            radius = 3
+            canvas = tk.Canvas(
+                root,
+                bg=transparent_color,
+                highlightthickness=0,
+                borderwidth=0,
+            )
+            canvas.grid(row=0, column=0, sticky="nsew")
+            text_id = canvas.create_text(
+                padding_x,
+                padding_y,
+                anchor="nw",
+                fill="#111111",
+                text=message,
+                width=360,
+            )
+            text_bbox = canvas.bbox(text_id) or (0, 0, 1, 1)
+            width = text_bbox[2] + padding_x
+            height = text_bbox[3] + padding_y
+            canvas.configure(width=width, height=height)
+            background_id = self.create_rounded_rectangle(
+                canvas,
+                0,
+                0,
+                width,
+                height,
+                radius,
+                fill="#f3f3f3",
+                outline="#b8b8b8",
+            )
+            canvas.tag_lower(background_id, text_id)
+
+            root.update_idletasks()
+            screen_width = root.winfo_screenwidth()
+            screen_height = root.winfo_screenheight()
+            x = max(0, screen_width - width - 24)
+            y = max(0, screen_height - height - 96)
+            root.geometry(f"+{x}+{y}")
+            root.after(3500, root.destroy)
+            logging.info("tray popup visible x=%s y=%s width=%s height=%s", x, y, width, height)
+            root.mainloop()
+            logging.info("run_tray_popup end")
+        except Exception:
+            logging.exception("run_tray_popup failed")
+
+    def create_rounded_rectangle(
+        self,
+        canvas,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        radius: int,
+        **kwargs,
+    ):
+        points = [
+            x1 + radius,
+            y1,
+            x2 - radius,
+            y1,
+            x2,
+            y1,
+            x2,
+            y1 + radius,
+            x2,
+            y2 - radius,
+            x2,
+            y2,
+            x2 - radius,
+            y2,
+            x1 + radius,
+            y2,
+            x1,
+            y2,
+            x1,
+            y2 - radius,
+            x1,
+            y1 + radius,
+            x1,
+            y1,
+        ]
+        return canvas.create_polygon(points, smooth=True, splinesteps=4, **kwargs)
 
 
 def main() -> int:
@@ -1258,6 +1743,8 @@ def main() -> int:
         raise
     finally:
         uninstall_console_ctrl_handler()
+        if app.restart_requested:
+            app.start_replacement_process()
     logging.info("main end")
     return 0
 
