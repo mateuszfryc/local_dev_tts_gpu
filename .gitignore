@@ -1,0 +1,12 @@
+.local/
+.venv/
+.agents/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Editor and OS noise
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

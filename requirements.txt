@@ -1,0 +1,14 @@
+--extra-index-url https://pypi.ngc.nvidia.com
+
+faster-whisper==1.2.1
+nvidia-cublas-cu12
+nvidia-cuda-runtime-cu12
+nvidia-cudnn-cu12==9.*
+sounddevice>=0.5.1
+numpy>=2.0.0
+pystray>=0.19.5
+pillow>=10.0.0
+keyboard>=0.13.5
+pyperclip>=1.9.0
+pywin32>=306
+comtypes>=1.4.0
