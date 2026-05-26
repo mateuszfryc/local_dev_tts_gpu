@@ -1,4 +1,4 @@
-# Whisper Tray Dictation For Windows 10/11
+﻿# Whisper Tray Dictation For Windows 10/11
 
 Windows-only tray dictation app using `faster-whisper`.
 
@@ -6,6 +6,7 @@ Windows-only tray dictation app using `faster-whisper`.
 
 - Starts as a Windows tray application.
 - `Ctrl+Shift+Space` toggles recording by default.
+- Left-clicking the tray icon toggles recording too.
 - The first press starts recording from the default microphone.
 - The second press stops recording and transcribes the audio with the selected `faster-whisper` model.
 - If `.local/models/` has no downloaded model, startup asks which model to download before dictation is enabled.
@@ -15,15 +16,16 @@ Windows-only tray dictation app using `faster-whisper`.
 - The transcript is pasted into the focused text input when one is detected.
 - If no focused text input is detected, the transcript is left in the clipboard.
 - The tray icon is white when idle and red while recording, transcribing, downloading, or warming up the model.
-- Right-click the tray icon to restart, exit, choose transcription language, choose the model, set the recording shortcut, or use debug actions.
+- Right-click the tray icon to restart, exit, choose transcription language, choose the model, choose inference device/compute settings, set the recording shortcut, or use debug actions.
 - The `set shortcut` tray option opens a small input above the tray area; press the shortcut combination and then Enter to save it.
 - The language menu supports `auto`, `en`, and `pl`.
 - The model menu is populated from `faster_whisper.utils.available_models()`, with `large-v3` placed first as the default.
 - The current language and model are shown with native tray menu radio/check indicators.
-- The selected language, model, and shortcut are saved in `.local/settings/config.json`.
+- The selected language, model, shortcut, inference device, and compute type are saved in `.local/settings/config.json`.
 - Models are downloaded and cached under `.local/models/` in this workspace.
 - The debug menu can remove `.local/` and restart model selection, or open `.local/logs/`.
-- GPU inference uses CUDA device `0` by default. If it is unavailable, the app shows `gpu inference not available, running on cpu` and falls back to CPU.
+- GPU inference uses CUDA device `0` by default with `float16` compute. CPU inference uses `int8` by default.
+- If GPU is selected but unavailable, the app shows `gpu inference not available, running on cpu` and falls back to CPU `int8`.
 
 ## Create a local environment
 
@@ -49,7 +51,7 @@ pip install -r requirements.txt
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python .\tray_whisper_dictation.py
+python .\main.py
 ```
 
 The first transcription can take longer because `faster-whisper` downloads the selected model into `.local/models/`.
@@ -73,8 +75,19 @@ On Windows, the script adds the DLL directories from those wheels before importi
 ## Local files
 
 - `.local/models/` stores downloaded model files.
-- `.local/settings/config.json` stores the selected language, model, and shortcut.
+- `.local/settings/config.json` stores the selected language, model, shortcut, inference device, and compute type.
 - `.local/logs/[timestamp].log` stores one runtime log file per program session.
+
+## Code layout
+
+- `main.py` is the thin entrypoint.
+- `src/runtime.py` owns process startup, logging, Python version checks, Ctrl+C handling, and CUDA/NVIDIA DLL preparation.
+- `src/settings.py` owns local paths, saved settings, language modes, model selection, and available model discovery.
+- `src/hotkeys.py` owns global shortcut parsing and Win32 hotkey registration.
+- `src/speech.py` owns microphone recording, model download, model warmup, and transcription.
+- `src/delivery.py` owns focused text input detection and transcript paste/clipboard delivery.
+- `src/tray_ui.py` owns the tray icon, menus, dialogs, and visible notifications.
+- `src/app.py` coordinates the dictation session state machine across those modules.
 
 ## Operational notes
 

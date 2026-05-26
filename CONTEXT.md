@@ -24,9 +24,29 @@ _Avoid_: locale, UI language
 The saved `faster-whisper` model name used for future dictation sessions.
 _Avoid_: engine, backend
 
+**Inference device**:
+The saved preference for running transcription on `gpu` or `cpu`. GPU means CUDA device `0`; CPU means no CUDA inference.
+_Avoid_: backend, target
+
+**Compute type**:
+The saved CTranslate2 inference precision/quantization setting, such as `float16`, `int8`, or `int8_float16`.
+_Avoid_: dtype, precision
+
 **First model download**:
 The required startup step that obtains the first local model before dictation sessions are allowed.
 _Avoid_: setup, install
+
+**Model warmup**:
+The startup step that transcribes `assets/warmup.mp3` and discards the transcript so the selected model and GPU dependencies are loaded before the first dictation session.
+_Avoid_: preload, dummy run
+
+**Tray notification**:
+A short message shown near the Windows tray area after important app events, including transcript delivery, model download, and model warmup.
+_Avoid_: toast, alert
+
+**Local data reset**:
+The debug action that removes `.local/`, clears saved settings and downloaded models, and returns the app to first model download.
+_Avoid_: cleanup, wipe
 
 ## Example Dialogue
 
