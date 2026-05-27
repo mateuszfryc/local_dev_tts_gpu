@@ -15,7 +15,7 @@ from src.hotkeys import (
     key_name_from_tk_event,
     parse_hotkey,
 )
-from src.settings import APP_NAME, LOGS_DIR
+from src.settings import APP_NAME, LOGS_DIR, MODELS_DIR_LABEL
 
 
 NIM_MODIFY = 0x00000001
@@ -293,7 +293,7 @@ def show_initial_model_dialog(model_names: tuple[str, ...]) -> str:
     frame = ttk.Frame(root, padding=16)
     frame.grid(row=0, column=0, sticky="nsew")
     message = (
-        "No model is downloaded in .local/models.\n"
+        f"No model is downloaded in {MODELS_DIR_LABEL}.\n"
         "Choose the model to download before dictation can be used."
     )
     ttk.Label(frame, text=message, justify="left").grid(row=0, column=0, sticky="w", pady=(0, 12))

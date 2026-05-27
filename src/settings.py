@@ -1,14 +1,23 @@
 ﻿import json
 import logging
+import sys
 from pathlib import Path
 
 
+def is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
-LOCAL_DIR = WORKSPACE_ROOT / ".local"
+BUNDLE_ROOT = Path(getattr(sys, "_MEIPASS", WORKSPACE_ROOT)).resolve()
+APP_ROOT = Path(sys.executable).resolve().parent if is_frozen_app() else WORKSPACE_ROOT
+LOCAL_DATA_DIR_NAME = "data" if is_frozen_app() else ".local"
+LOCAL_DIR = APP_ROOT / LOCAL_DATA_DIR_NAME
 MODELS_DIR = LOCAL_DIR / "models"
 SETTINGS_DIR = LOCAL_DIR / "settings"
 LOGS_DIR = LOCAL_DIR / "logs"
-WARMUP_AUDIO_PATH = WORKSPACE_ROOT / "assets" / "warmup.mp3"
+MODELS_DIR_LABEL = f"{LOCAL_DATA_DIR_NAME}/models"
+WARMUP_AUDIO_PATH = BUNDLE_ROOT / "assets" / "warmup.mp3"
 
 APP_NAME = "Whisper Tray Dictation"
 DEFAULT_HOTKEY = "ctrl+shift+space"

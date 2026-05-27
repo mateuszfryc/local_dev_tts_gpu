@@ -14,6 +14,7 @@ from src.delivery import TranscriptDelivery
 from src.hotkeys import HotkeyManager, parse_hotkey
 from src.runtime import close_logging_for_local_delete, release_single_instance, setup_logging
 from src.settings import (
+    APP_ROOT,
     CLIPBOARD_MESSAGE,
     DEFAULT_CPU_COMPUTE,
     DEFAULT_GPU_COMPUTE,
@@ -25,8 +26,10 @@ from src.settings import (
     WORKSPACE_ROOT,
     Config,
     get_available_model_names,
+    is_frozen_app,
 )
 from src.speech import AudioRecorder, WhisperEngine
+from src.startup import WindowsStartup
 from src.tray_ui import TrayInterface, show_initial_model_dialog, show_shortcut_dialog
 
 
@@ -52,6 +55,7 @@ class DictationApp:
         self.restart_requested = False
 
         self.tray = TrayInterface()
+        self.startup = WindowsStartup()
         self.engine = WhisperEngine(self.notify)
         self.delivery = TranscriptDelivery()
         self.recorder = AudioRecorder(lambda: self.state == AppState.RECORDING)
@@ -110,6 +114,11 @@ class DictationApp:
                 "set shortcut",
                 self.set_shortcut,
                 enabled=lambda _item: self.state == AppState.IDLE,
+            ),
+            pystray.MenuItem(
+                "start with windows",
+                self.toggle_windows_startup,
+                checked=lambda _item: self.startup.is_enabled(),
             ),
             pystray.MenuItem(
                 "debug",
@@ -529,6 +538,21 @@ class DictationApp:
     def open_logs_directory(self, _icon=None, _item=None) -> None:
         self.tray.open_logs_directory(self.notify)
 
+    def toggle_windows_startup(self, _icon=None, _item=None) -> None:
+        logging.info("toggle_windows_startup requested")
+        try:
+            if self.startup.is_enabled():
+                self.startup.disable()
+                self.notify("start with windows disabled")
+            else:
+                self.startup.enable()
+                self.notify("start with windows enabled")
+            if self.tray.icon:
+                self.tray.icon.update_menu()
+        except Exception as exc:
+            logging.exception("failed to toggle Windows startup")
+            self.notify(f"failed to update Windows startup: {exc}")
+
     def restart_app(self, _icon=None, _item=None) -> None:
         logging.info("restart_app requested")
         self.restart_requested = True
@@ -556,12 +580,17 @@ class DictationApp:
 
     def start_replacement_process(self) -> None:
         logging.info("start_replacement_process requested")
-        args = [sys.executable, str(WORKSPACE_ROOT / "main.py")]
+        if is_frozen_app():
+            args = [sys.executable]
+            cwd = APP_ROOT
+        else:
+            args = [sys.executable, str(WORKSPACE_ROOT / "main.py")]
+            cwd = WORKSPACE_ROOT
         try:
             release_single_instance()
             subprocess.Popen(
                 args,
-                cwd=str(WORKSPACE_ROOT),
+                cwd=str(cwd),
                 close_fds=True,
                 creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
             )

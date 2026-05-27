@@ -40,12 +40,20 @@ _Avoid_: setup, install
 The startup step that transcribes `assets/warmup.mp3` and discards the transcript so the selected model and GPU dependencies are loaded before the first dictation session.
 _Avoid_: preload, dummy run
 
+**Runtime local data**:
+The saved settings, downloaded models, and runtime logs used by the current app installation.
+_Avoid_: workspace data, build data
+
+**Start with Windows**:
+The tray menu option that controls whether the current app installation starts automatically when the current Windows user signs in.
+_Avoid_: autostart, startup task
+
 **Tray notification**:
 A short message shown near the Windows tray area after important app events, including transcript delivery, model download, and model warmup.
 _Avoid_: toast, alert
 
 **Local data reset**:
-The debug action that removes `.local/`, clears saved settings and downloaded models, and returns the app to first model download.
+The debug action that removes runtime local data, clears saved settings and downloaded models, and returns the app to first model download.
 _Avoid_: cleanup, wipe
 
 ## Example Dialogue

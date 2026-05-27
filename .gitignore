@@ -1,4 +1,7 @@
 .local/
+.build/
+dist/
+data/
 .venv/
 .agents/
 __pycache__/
